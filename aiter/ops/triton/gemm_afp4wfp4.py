@@ -318,20 +318,24 @@ def _gemm_afp4_wfp4_kernel_preshuffled_scales(
         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
         for k in range(pid_k * num_k_iter, (pid_k + 1) * num_k_iter):
-            a_scales = (
-                tl.load(a_scale_ptrs)
-                .reshape(
-                    BLOCK_SIZE_M // 32,
-                    BLOCK_SIZE_K // SCALE_GROUP_SIZE // 8,
-                    4,
-                    16,
-                    2,
-                    2,
-                    1,
+            if BLOCK_SIZE_M < 32:
+                a_scales = tl.load(a_scale_ptrs)
+            else:
+                a_scales = (
+                    tl.load(a_scale_ptrs)
+                    .reshape(
+                        BLOCK_SIZE_M // 32,
+                        BLOCK_SIZE_K // SCALE_GROUP_SIZE // 8,
+                        4,
+                        16,
+                        2,
+                        2,
+                        1,
+                    )
+                    .permute(0, 5, 3, 1, 4, 2, 6)
+                    .reshape(BLOCK_SIZE_M, BLOCK_SIZE_K // SCALE_GROUP_SIZE)
                 )
-                .permute(0, 5, 3, 1, 4, 2, 6)
-                .reshape(BLOCK_SIZE_M, BLOCK_SIZE_K // SCALE_GROUP_SIZE)
-            )
+    
             b_scales = (
                 tl.load(b_scale_ptrs)
                 .reshape(
@@ -503,6 +507,9 @@ def _get_config(
             key = f"default{shuffle_filename_suffix}"  # fall back to default config
 
     if M < 32:
+        BLK_M = triton.next_power_of_2(M)
+        if BLK_M >= 16 and hasattr(_get_config._config_dict[key], "small_M16"):
+            return _get_config._config_dict[key]["small_M16"]
         return _get_config._config_dict[key]["small"]
     elif M <= 128:
         BLK_M = triton.next_power_of_2(M)
@@ -713,6 +720,10 @@ def gemm_afp4wfp4_preshuffled_scales(
         config["SPLITK_BLOCK_SIZE"] = 2 * K
 
     config["BLOCK_SIZE_N"] = max(config["BLOCK_SIZE_N"], 32)
+    if M < 32:
+        assert config["BLOCK_SIZE_M"] <= 16, "for M < 32, BLOCK_SIZE_M must be 16 or less as x_scale are assumed to be un-shuffled"
+    else:
+        assert config["BLOCK_SIZE_M"] >= 32, "for M >= 32, BLOCK_SIZE_M must be 32 or more as x_scale are assumed to be preshuffled"
 
     grid = lambda META: (  # noqa: E731
         (

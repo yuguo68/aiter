@@ -153,6 +153,10 @@ def get_x_vals():
     x_vals += [(16, 16384, 3328 * 2), (128, 16384, 3328 * 2)]
     x_vals += [(256, 3584, 2112)]
     x_vals += [(7, 4608, 7168), (7, 7168, 2304)]
+    x_vals += [(v, 106496, 16384) for v in [1, 8, 16, 32, 64, 128, 256]]
+    x_vals += [(v, 16384, 53248) for v in [1, 8, 16, 32, 64, 128, 256]]
+    x_vals += [(v, 18432, 16384) for v in [1, 8, 16, 32, 64, 128, 256]]
+    x_vals += [(v, 16384, 16384) for v in [1, 8, 16, 32, 64, 128, 256]]
     x_vals += [(1, 1, 32)]  # minimal case
     return x_vals
 
@@ -207,8 +211,7 @@ def run_torch(x, w, x_scales, w_scales, dtype):
 @pytest.mark.parametrize("M, N, K", get_x_vals())
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("output", [True, False])
-@pytest.mark.parametrize("shuffle_scales", [True])
-@pytest.mark.parametrize("shuffle_weight", [True])
+@pytest.mark.parametrize("shuffle_scales, shuffle_weight", [(False, False), (True, False), (True, True)])
 def test_gemm_afp4_wfp4(
     M: int, N: int, K: int, dtype, output, shuffle_scales, shuffle_weight
 ):
@@ -219,7 +222,7 @@ def test_gemm_afp4_wfp4(
         pytest.skip("Preshuffling weight without preshuffled scales is not supported")
 
     if shuffle_weight or shuffle_scales:
-        if shuffle_scales and M < 32:
+        if shuffle_scales and not shuffle_weight and M < 32:
             pytest.skip("Minimal tile size for preshuffled scales is 32x32x256")
 
         if N % 32 > 0:

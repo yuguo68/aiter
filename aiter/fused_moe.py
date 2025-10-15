@@ -431,6 +431,9 @@ def get_2stage_cfgs(
         logger.info("\033[0m")
 
     cfg = cfg_2stages.get(keys, None)
+    if cfg["kernelName2"] == 'Null':
+        cfg['run_1stage'] = True
+
     if cfg is None and os.environ.get("AITER_ONLINE_TUNE", "0") == "1":
         lock_path = os.path.join(bd_dir, f"lock_fmoe_tune_{keys}")
         mp_lock(lock_path, MainFunc=MainFunc, FinalFunc=FinalFunc)

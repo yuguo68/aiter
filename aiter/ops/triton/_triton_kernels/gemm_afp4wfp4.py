@@ -9,6 +9,24 @@ import triton.language as tl
 from ..utils._triton.pid_preprocessing import pid_grid, remap_xcd
 from ..utils._triton import arch_info
 from ..utils.core import AITER_TRITON_CONFIGS_PATH
+from ..utils._triton.kernel_repr import make_kernel_repr
+
+
+_gemm_afp4wfp4_repr = make_kernel_repr(
+    "_gemm_afp4wfp4_kernel",
+    [
+        "BLOCK_SIZE_M",
+        "BLOCK_SIZE_N",
+        "BLOCK_SIZE_K",
+        "GROUP_SIZE_M",
+        "num_warps",
+        "num_stages",
+        "waves_per_eu",
+        "matrix_instr_nonkdim",
+        "cache_modifier",
+        "NUM_KSPLIT",
+    ],
+)
 
 
 @triton.heuristics(
@@ -18,8 +36,8 @@ from ..utils.core import AITER_TRITON_CONFIGS_PATH
         and (args["K"] % (args["SPLITK_BLOCK_SIZE"] // 2) == 0),
     }
 )
-@triton.jit
-def _gemm_afp4_wfp4_kernel(
+@triton.jit(repr=_gemm_afp4wfp4_repr)
+def _gemm_afp4wfp4_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -47,6 +65,10 @@ def _gemm_afp4_wfp4_kernel(
     NUM_KSPLIT: tl.constexpr,
     SPLITK_BLOCK_SIZE: tl.constexpr,
     EVEN_K: tl.constexpr,
+    num_warps: tl.constexpr,
+    num_stages: tl.constexpr,
+    waves_per_eu: tl.constexpr,
+    matrix_instr_nonkdim: tl.constexpr,
     cache_modifier: tl.constexpr,
 ):
     """Kernel for computing the matmul C = A x B.
@@ -174,7 +196,7 @@ def _gemm_afp4_wfp4_kernel(
     }
 )
 @triton.jit
-def _gemm_afp4_wfp4_kernel_preshuffled_scales(
+def _gemm_afp4wfp4_kernel_preshuffled_scales(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -370,6 +392,23 @@ def _gemm_afp4_wfp4_kernel_preshuffled_scales(
         tl.store(c_ptrs, c, mask=c_mask, cache_modifier=".wt")
 
 
+_gemm_afp4wfp4_preshuffle_repr = make_kernel_repr(
+    "_gemm_afp4wfp4_preshuffle_kernel",
+    [
+        "BLOCK_SIZE_M",
+        "BLOCK_SIZE_N",
+        "BLOCK_SIZE_K",
+        "GROUP_SIZE_M",
+        "num_warps",
+        "num_stages",
+        "waves_per_eu",
+        "matrix_instr_nonkdim",
+        "cache_modifier",
+        "NUM_KSPLIT",
+    ],
+)
+
+
 @triton.heuristics(
     {
         "EVEN_K": lambda args: (args["K"] % (args["BLOCK_SIZE_K"] // 2) == 0)
@@ -377,8 +416,8 @@ def _gemm_afp4_wfp4_kernel_preshuffled_scales(
         and (args["K"] % (args["SPLITK_BLOCK_SIZE"] // 2) == 0),
     }
 )
-@triton.jit
-def _gemm_afp4_wfp4_kernel_preshuffled_weight_scales(
+@triton.jit(repr=_gemm_afp4wfp4_preshuffle_repr)
+def _gemm_afp4wfp4_preshuffle_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -406,6 +445,10 @@ def _gemm_afp4_wfp4_kernel_preshuffled_weight_scales(
     NUM_KSPLIT: tl.constexpr,
     SPLITK_BLOCK_SIZE: tl.constexpr,
     EVEN_K: tl.constexpr,
+    num_warps: tl.constexpr,
+    num_stages: tl.constexpr,
+    waves_per_eu: tl.constexpr,
+    matrix_instr_nonkdim: tl.constexpr,
     cache_modifier: tl.constexpr,
 ):
     """Kernel for computing the matmul C = A x B.
@@ -427,9 +470,6 @@ def _gemm_afp4_wfp4_kernel_preshuffled_weight_scales(
 
     GRID_MN = tl.cdiv(M, BLOCK_SIZE_M) * tl.cdiv(N, BLOCK_SIZE_N)
 
-    # -----------------------------------------------------------
-    # Map program ids `pid` to the block of C it should compute.
-    # This is done in a grouped ordering to promote L2 data reuse.
     pid_unified = tl.program_id(axis=0)
     pid_unified = remap_xcd(pid_unified, GRID_MN * NUM_KSPLIT, NUM_XCDS=8)
     pid_k = pid_unified % NUM_KSPLIT
@@ -445,15 +485,12 @@ def _gemm_afp4_wfp4_kernel_preshuffled_weight_scales(
 
     tl.assume(pid_m >= 0)
     tl.assume(pid_n >= 0)
-    # We assume 32 elements along K share the same scale.
     SCALE_GROUP_SIZE: tl.constexpr = 32
 
     if (pid_k * SPLITK_BLOCK_SIZE // 2) < K:
 
         num_k_iter = tl.cdiv(SPLITK_BLOCK_SIZE // 2, BLOCK_SIZE_K // 2)
 
-        # Create pointers for first block of A and B input matrices
-        # The BLOCK sizes are of the elements and in fp4 we pack 2 per uint8 container.
         offs_k = tl.arange(0, BLOCK_SIZE_K // 2)
         offs_k_shuffle_arr = tl.arange(0, (BLOCK_SIZE_K // 2) * 16)
         offs_k_split = pid_k * (SPLITK_BLOCK_SIZE // 2) + offs_k
@@ -465,11 +502,8 @@ def _gemm_afp4_wfp4_kernel_preshuffled_weight_scales(
             offs_am[:, None] * stride_am + offs_k_split[None, :] * stride_ak
         )
         b_ptrs = b_ptr + (
-            # offs_k_split[:, None] * stride_bk + offs_bn[None, :] * stride_bn
-            offs_bn[:, None] * stride_bn
-            + offs_k_shuffle[None, :] * stride_bk
+            offs_bn[:, None] * stride_bn + offs_k_shuffle[None, :] * stride_bk
         )
-        # Create pointers for the first block of A and B scales
 
         offs_asn = (
             pid_n * (BLOCK_SIZE_N // 32) + tl.arange(0, (BLOCK_SIZE_N // 32))
@@ -477,7 +511,6 @@ def _gemm_afp4_wfp4_kernel_preshuffled_weight_scales(
         offs_ks = (pid_k * (SPLITK_BLOCK_SIZE // SCALE_GROUP_SIZE) * 32) + tl.arange(
             0, BLOCK_SIZE_K // SCALE_GROUP_SIZE * 32
         )
-        # B scales are N x K even though B operand is K x N.
         b_scale_ptrs = (
             b_scales_ptr
             + offs_asn[:, None] * stride_bsn
@@ -539,8 +572,6 @@ def _gemm_afp4_wfp4_kernel_preshuffled_weight_scales(
                 .reshape(BLOCK_SIZE_N, BLOCK_SIZE_K // SCALE_GROUP_SIZE)
             )
 
-            # Load the next block of A and B, generate a mask by checking the K dimension.
-            # If it is out of bounds, set it to 0.
             if EVEN_K:
                 a = tl.load(a_ptrs)
                 b = tl.load(b_ptrs, cache_modifier=cache_modifier)
@@ -561,7 +592,6 @@ def _gemm_afp4_wfp4_kernel_preshuffled_weight_scales(
 
             accumulator += tl.dot_scaled(a, a_scales, "e2m1", b, b_scales, "e2m1")
 
-            # Advance the ptrs to the next K block.
             a_ptrs += (BLOCK_SIZE_K // 2) * stride_ak
             b_ptrs += (BLOCK_SIZE_K // 2) * 16 * stride_bk
             if BLOCK_SIZE_M < 32:
@@ -572,7 +602,6 @@ def _gemm_afp4_wfp4_kernel_preshuffled_weight_scales(
 
         c = accumulator.to(c_ptr.type.element_ty)
 
-        # Write back the block of the output matrix C with masks.
         offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
         offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)
         c_ptrs = (
@@ -585,8 +614,21 @@ def _gemm_afp4_wfp4_kernel_preshuffled_weight_scales(
         tl.store(c_ptrs, c, mask=c_mask, cache_modifier=".wt")
 
 
-@triton.jit
-def _gemm_afp4_wfp4_reduce_kernel(
+_gemm_afp4wfp4_reduce_repr = make_kernel_repr(
+    "_gemm_afp4wfp4_reduce_kernel",
+    [
+        "BLOCK_SIZE_M",
+        "BLOCK_SIZE_N",
+        "ACTUAL_KSPLIT",
+        "MAX_KSPLIT",
+        "num_warps",
+        "waves_per_eu",
+    ],
+)
+
+
+@triton.jit(repr=_gemm_afp4wfp4_reduce_repr)
+def _gemm_afp4wfp4_reduce_kernel(
     c_in_ptr,
     c_out_ptr,
     M,

@@ -1170,8 +1170,12 @@ def paged_attention_decode_v2_gluon_fp8(
     stride_output_head,
     stride_output_part,
     stride_output_group,
-    stride_query_seq,
-    stride_query_head,
+    # stride_query_seq,
+    # stride_query_head,
+    stride_query_bs,
+    stride_query_qlen,
+    stride_query_kv_head,
+    stride_query_group_size,
     stride_key_block,
     stride_key_head,
     stride_key_head_split,
@@ -1269,6 +1273,8 @@ def paged_attention_decode_v2_gluon_fp8(
         OUTPUT_DTYPE: gl.constexpr = COMPUTE_TYPE
     LOG2_E: gl.constexpr = 1.4426950408889634  # log2(e) for exponential conversion
     CONTIGUOUS_KV_ELEMENTS_PER_16B_LOAD: gl.constexpr = KV_16B_ELEMENT_COUNT
+    QUERY_GROUP_SIZE_ONE_Q: gl.constexpr = 8
+    QUERY_SEQ_LEN: gl.constexpr = 4
 
     K_HEAD_SIZE_SPLITS: gl.constexpr = (
         HEAD_SIZE_POW2 // CONTIGUOUS_KV_ELEMENTS_PER_16B_LOAD
@@ -1277,6 +1283,15 @@ def paged_attention_decode_v2_gluon_fp8(
 
     # ==================== MEMORY LAYOUT DEFINITIONS ====================
     # Query tensor layout - optimized for sequential access
+    # [QUERY_SEQ_LEN, QUERY_GROUP_SIZE_ONE_Q, HEAD_SIZE_POW2]
+    mtp_blocked_query_layout: gl.constexpr = gl.BlockedLayout(
+        size_per_thread=[1, 1, 8],
+        threads_per_warp=[1, 4, 16],
+        # warps_per_cta=[4, 1, 1],
+        warps_per_cta=[2, 2, 1],
+        order=[2, 1, 0],
+    )
+    # [QUERY_GROUP_SIZE_POW2, HEAD_SIZE_POW2]
     blocked_query_layout: gl.constexpr = gl.BlockedLayout(
         size_per_thread=[1, 8],
         threads_per_warp=[4, 16],
@@ -1286,6 +1301,7 @@ def paged_attention_decode_v2_gluon_fp8(
     shared_query_layout: gl.constexpr = gl.SwizzledSharedLayout(8, 1, 16, order=[1, 0])
 
     # Key cache layout - optimized for block-wise access patterns
+    # [MAX_NUM_KV_BLOCKS_PER_COMPUTE, K_HEAD_SIZE_SPLITS, KV_BLOCK_SIZE, CONTIGUOUS_KV_ELEMENTS_PER_16B_LOAD]
     blocked_key_layout_fp8: gl.constexpr = gl.BlockedLayout(
         size_per_thread=[1, 1, 1, 16],
         threads_per_warp=[1, 4, 16, 1],
@@ -1418,6 +1434,15 @@ def paged_attention_decode_v2_gluon_fp8(
     # ==================== LAYOUT SLICE DEFINITIONS ====================
 
     # Query layout slices
+    mtp_query_len_layout: gl.constexpr = gl.SliceLayout(
+        1, gl.SliceLayout(2, mtp_blocked_query_layout)
+    )
+    mtp_query_group_size_layout: gl.constexpr = gl.SliceLayout(
+        0, gl.SliceLayout(2, mtp_blocked_query_layout)
+    )
+    mtp_head_size_layout: gl.constexpr = gl.SliceLayout(
+        0, gl.SliceLayout(1, mtp_blocked_query_layout)
+    )
     query_group_size_layout: gl.constexpr = gl.SliceLayout(1, blocked_query_layout)
     head_size_layout: gl.constexpr = gl.SliceLayout(0, blocked_query_layout)
 
@@ -1436,6 +1461,12 @@ def paged_attention_decode_v2_gluon_fp8(
     )
 
     # Coordinate offsets for various dimensions
+    mtp_query_len_offsets = gl.arange(0, QUERY_SEQ_LEN, layout=mtp_query_len_layout)
+    mtp_query_group_size_offsets = gl.arange(
+        0, QUERY_GROUP_SIZE_ONE_Q, layout=mtp_query_group_size_layout
+    )
+    mtp_head_size_offsets = gl.arange(0, HEAD_SIZE_POW2, layout=mtp_head_size_layout)
+
     query_group_offsets = gl.arange(
         0, QUERY_GROUP_SIZE_POW2, layout=query_group_size_layout
     )
@@ -1457,21 +1488,45 @@ def paged_attention_decode_v2_gluon_fp8(
     sequence_partition_idx = gl.program_id(2)
 
     # Load query tensor with appropriate masking
-    query_offsets_base = (
-        sequence_idx * stride_query_seq
-        + (kv_head_idx * QUERY_GROUP_SIZE + query_group_offsets[:, None])
-        * stride_query_head
-        + head_size_offsets[None, :]
+    mtp_query_offsets = (
+        sequence_idx * stride_query_bs
+        + mtp_query_len_offsets[:, None, None] * stride_query_qlen
+        + kv_head_idx * stride_query_kv_head
+        + mtp_query_group_size_offsets[None, :, None] * stride_query_group_size
+        + mtp_head_size_offsets[None, None, :]
     )
-    query_mask = (query_group_offsets[:, None] < QUERY_GROUP_SIZE) & (
-        head_size_offsets[None, :] < head_size
+    mtp_query_mask = (
+        (mtp_query_len_offsets[:, None, None] < query_seq_len)
+        & (mtp_query_group_size_offsets[None, :, None] < query_group_size_original)
+        & (mtp_head_size_offsets[None, None, :] < head_size)
     )
-    query_tensor = gl.amd.cdna3.buffer_load(
-        ptr=query_ptr, offsets=query_offsets_base, mask=query_mask
+    # [QUERY_SEQ_LEN, QUERY_GROUP_SIZE_ONE_Q, HEAD_SIZE_POW2]
+    mtp_query_tensor = gl.amd.cdna3.buffer_load(
+        ptr=query_ptr, offsets=mtp_query_offsets, mask=mtp_query_mask
     )
+    mtp_query_tensor = gl.reshape(
+        mtp_query_tensor, [QUERY_SEQ_LEN * QUERY_GROUP_SIZE_ONE_Q, HEAD_SIZE_POW2]
+    )
+    query_tensor = gl.convert_layout(mtp_query_tensor, layout=blocked_query_layout)
     query_shared = gl.allocate_shared_memory(
         query_tensor.dtype, query_tensor.shape, shared_query_layout, query_tensor
     )
+
+    # query_offsets_base = (
+    #     sequence_idx * stride_query_seq
+    #     + (kv_head_idx * QUERY_GROUP_SIZE + query_group_offsets[:, None])
+    #     * stride_query_head
+    #     + head_size_offsets[None, :]
+    # )
+    # query_mask = (query_group_offsets[:, None] < QUERY_GROUP_SIZE) & (
+    #     head_size_offsets[None, :] < head_size
+    # )
+    # query_tensor = gl.amd.cdna3.buffer_load(
+    #     ptr=query_ptr, offsets=query_offsets_base, mask=query_mask
+    # )
+    # query_shared = gl.allocate_shared_memory(
+    #     query_tensor.dtype, query_tensor.shape, shared_query_layout, query_tensor
+    # )
 
     # Load query quantization scales if needed
     if QUERY_QUANT_MODE == 0:
@@ -2435,8 +2490,12 @@ def _paged_attention_decode_v2_with_dot_kernel_reshape_wrapper(
     stride_output_head,
     stride_output_part,
     stride_output_group,
-    stride_query_seq,
-    stride_query_head,
+    # stride_query_seq,
+    # stride_query_head,
+    stride_query_bs,
+    stride_query_qlen,
+    stride_query_kv_head,
+    stride_query_group_size,
     stride_key_block,
     stride_key_head,
     stride_key_head_split,
@@ -2516,8 +2575,12 @@ def _paged_attention_decode_v2_with_dot_kernel_reshape_wrapper(
         stride_output_head,
         stride_output_part,
         stride_output_group,
-        stride_query_seq,
-        stride_query_head,
+        # stride_query_seq,
+        # stride_query_head,
+        stride_query_bs,
+        stride_query_qlen,
+        stride_query_kv_head,
+        stride_query_group_size,
         stride_key_block,
         stride_key_head,
         stride_key_head_split,
@@ -2744,20 +2807,20 @@ def pa_decode_gluon(
     num_kv_heads = key_cache.shape[1]
     query_group_size = num_query_heads // num_kv_heads
 
-    if query_length > 1:
-        # Transpose query and query_scale from [num_seqs * query_length, num_query_heads, head_size]
-        # to [num_seqs, num_kv_heads * query_length * query_group_size, head_size]
-        transpose_query_gluon(
-            query=query,
-            query_gluon=query_gluon,
-            query_scale=query_scale,
-            query_scale_gluon=query_scale_gluon,
-            batch_size=batch_size,
-            query_sequence_length=query_length,
-            num_kv_heads=num_kv_heads,
-            query_group_size=query_group_size,
-            head_size=head_size,
-        )
+    # if query_length > 1:
+    #     # Transpose query and query_scale from [num_seqs * query_length, num_query_heads, head_size]
+    #     # to [num_seqs, num_kv_heads * query_length * query_group_size, head_size]
+    #     transpose_query_gluon(
+    #         query=query,
+    #         query_gluon=query_gluon,
+    #         query_scale=query_scale,
+    #         query_scale_gluon=query_scale_gluon,
+    #         batch_size=batch_size,
+    #         query_sequence_length=query_length,
+    #         num_kv_heads=num_kv_heads,
+    #         query_group_size=query_group_size,
+    #         head_size=head_size,
+    #     )
 
     num_sequences = batch_size
     num_query_heads_total = num_query_heads
@@ -2895,13 +2958,17 @@ def pa_decode_gluon(
     if value_cache.dtype == aiter.dtypes.fp8:
         fp8_max_value = torch.finfo(aiter.dtypes.fp8).max
 
+    # query_input = query_gluon
+    query_input = query.reshape(
+        batch_size, query_length, num_kv_heads, query_group_size, head_size
+    )
     # ==================== ATTENTION DECODE KERNEL EXECUTION ====================
     _paged_attention_decode_v2_with_dot_kernel_reshape_wrapper(
         grid,
         exp_sums,
         max_logits,
         temporary_output,
-        query_gluon,
+        query_input,
         key_cache,
         value_cache,
         block_tables,
@@ -2917,8 +2984,10 @@ def pa_decode_gluon(
         temporary_output.stride(1),
         temporary_output.stride(2),
         temporary_output.stride(3),
-        query_gluon.stride(0),
-        query_gluon.stride(1),
+        query_input.stride(0),
+        query_input.stride(1),
+        query_input.stride(2),
+        query_input.stride(3),
         key_cache.stride(0),
         key_cache.stride(1),
         key_cache.stride(2),

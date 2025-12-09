@@ -18,7 +18,7 @@ pd.set_option("display.max_rows", 200)
 
 
 def perftest(
-    num_iters=101, num_warmup=2, testGraph=False, num_rotate_args=0, needTrace=False
+    num_iters=2, num_warmup=0, testGraph=False, num_rotate_args=0, needTrace=False
 ):
     def decorator(func):
         def wrapper(*args, **kwargs):

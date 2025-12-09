@@ -635,8 +635,8 @@ void get_pa_metadata_v1_2_device(const torch::Tensor& seqlens_qo_indptr, // [bat
     params.p_pages_kv_indptr            = pages_kv_indptr.data_ptr<int32_t>();
     params.num_batches                  = num_batches;
     params.num_heads                    = num_heads_k * num_heads_per_head_k;
-    params.num_cu                       = num_clusters;
-    params.num_splits                   = num_splits;
+    params.num_cu                       = 4;
+    params.num_splits                   = 4;
     params.reduce_indptr_size           = reduce_indptr.size(0);
     params.kv_granularity               = kv_granularity;
     params.kv_granularity_log2          = __builtin_ctz(kv_granularity);

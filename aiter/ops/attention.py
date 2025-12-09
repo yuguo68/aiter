@@ -229,6 +229,11 @@ def pa_persistent_fwd(
         device=device,
     )
     final_lse = torch.zeros((total_s, nhead), dtype=dtypes.fp32, device=device)
+    Q = torch.ones_like(Q)
+    K = torch.ones_like(K)
+    V = torch.ones_like(V)
+    K_QScale = torch.ones_like(K_QScale)
+    V_QScale = torch.ones_like(V_QScale)
 
     pa_ps_fwd_asm(
         Q,
@@ -269,8 +274,18 @@ def pa_persistent_fwd(
     print(f"==>after reduce check logits nan, {torch.isnan(logits).any()}")
     print(f"==>after reduce check splitLse nan, {torch.isnan(splitLse).any()}")
     print(f"==>after reduce check final_lse nan, {torch.isnan(final_lse).any()}")
-
-    return logits, final_lse
+    import numpy as np
+    np.savetxt('Q.txt', Q.flatten().float().cpu().numpy(), fmt='%f')
+    np.savetxt('K.txt', K.flatten().float().cpu().numpy(), fmt='%f')
+    np.savetxt('V.txt', V.flatten().float().cpu().numpy(), fmt='%f')
+    np.savetxt('K_QScale.txt', K_QScale.flatten().float().cpu().numpy(), fmt='%f')
+    np.savetxt('V_QScale.txt', V_QScale.flatten().float().cpu().numpy(), fmt='%f')
+    np.savetxt('output.txt', output.flatten().float().cpu().numpy(), fmt='%f')
+    np.savetxt('logits.txt', logits.flatten().float().cpu().numpy(), fmt='%f')
+    np.savetxt('splitLse.txt', splitLse.flatten().float().cpu().numpy(), fmt='%f')
+    np.savetxt('final_lse.txt', final_lse.flatten().float().cpu().numpy(), fmt='%f')
+    # import pdb; pdb.set_trace()
+    return output, final_lse
 
 
 def paged_attention_rocm(

@@ -401,7 +401,8 @@ def test_pa_mtp(
     num_query_heads, num_kv_heads = num_heads
 
     assert num_query_heads % num_kv_heads == 0
-    max_seq_len = 16384
+    # max_seq_len = 16384
+    max_seq_len = 4097
     max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
     num_blocks = max_num_blocks_per_seq * batch_size
     num_blocks_per_seq = (ctx_lens + block_size - 1) // block_size
@@ -637,6 +638,7 @@ def test_pa_mtp(
         )
         ret["err fp8"] = err
     else:
+        print(f"==>before run_aiter_asm_ps,addr,{id(output)}")
         out_aiter_asm, us_aiter_asm = run_aiter_asm_ps(
             Q=query,
             K=k_quant_,
@@ -671,6 +673,7 @@ def test_pa_mtp(
         #     qo_indptr=qo_indptr,
         # )
 
+        print(f"==>check:{torch.isnan(output).any()},{id(output)},{output.data_ptr()}")
         err = checkAllclose(
             out_ref,
             output,

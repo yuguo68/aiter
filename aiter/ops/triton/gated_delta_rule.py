@@ -5,6 +5,7 @@
 import torch
 import triton
 from aiter.ops.triton._triton_kernels.gated_delta_rule import _fused_recurrent_gated_delta_rule_fwd_kernel
+from aiter.ops.triton._triton_kernels.chunk_gated_delta_rule import chunk_gated_delta_rule_fwd
 from aiter.ops.triton.utils.logger import AiterTritonLogger
 
 _LOGGER = AiterTritonLogger()
@@ -168,4 +169,136 @@ def fused_recurrent_gated_delta_rule(
     )
     
     return o, final_state
+
+
+def chunk_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float = None,
+    initial_state: torch.Tensor = None,
+    output_final_state: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""
+    Chunk-based gated delta rule operation using Triton.
+
+    This function implements chunk-based parallel computation for the gated delta rule,
+    optimized for training and long sequences. It uses the native aiter implementation
+    with Triton kernels.
+
+    Args:
+        q (torch.Tensor):
+            queries of shape `[B, T, H, K]`.
+        k (torch.Tensor):
+            keys of shape `[B, T, H, K]`.
+        v (torch.Tensor):
+            values of shape `[B, T, H, V]`.
+        g (torch.Tensor):
+            g (decays in log space) of shape `[B, T, H]`.
+        beta (torch.Tensor):
+            betas of shape `[B, T, H]`.
+        scale (float, optional):
+            Scale factor for the attention scores.
+            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
+        initial_state (torch.Tensor, optional):
+            Initial state of shape `[N, H, K, V]` for `N` input sequences.
+            For equal-length input sequences, `N` equals the batch size `B`.
+            Default: `None`.
+        output_final_state (bool):
+            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+        use_qk_l2norm_in_kernel (bool):
+            Whether to use L2 normalization in the kernel. Default: `False`.
+        cu_seqlens (torch.LongTensor, optional):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API. Default: `None`.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]:
+            - o (torch.Tensor): Outputs of shape `[B, T, H, V]`.
+            - final_state (torch.Tensor): Final state of shape `[N, H, K, V]` if 
+              `output_final_state=True` else `None`.
+
+    Examples:
+        >>> import torch
+        >>> import torch.nn.functional as F
+        >>> from aiter.ops.triton.gated_delta_rule import chunk_gated_delta_rule
+        >>> # inputs with equal lengths
+        >>> B, T, H, K, V = 4, 2048, 4, 512, 512
+        >>> q = torch.randn(B, T, H, K, device='cuda')
+        >>> k = F.normalize(torch.randn(B, T, H, K, device='cuda'), p=2, dim=-1)
+        >>> v = torch.randn(B, T, H, V, device='cuda')
+        >>> beta = torch.rand(B, T, H, device='cuda').sigmoid()
+        >>> g = F.logsigmoid(torch.rand(B, T, H, device='cuda'))
+        >>> h0 = torch.randn(B, H, K, V, device='cuda')
+        >>> o, ht = chunk_gated_delta_rule(
+        ...     q, k, v, g, beta,
+        ...     initial_state=h0,
+        ...     output_final_state=True
+        ... )
+        >>> # for variable-length inputs, the batch size `B` is expected to be 1 
+        >>> # and `cu_seqlens` is required
+        >>> from einops import rearrange
+        >>> q, k, v, beta, g = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, beta, g))
+        >>> # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
+        >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
+        >>> o, ht = chunk_gated_delta_rule(
+        ...     q, k, v, g, beta,
+        ...     initial_state=h0,
+        ...     output_final_state=True,
+        ...     cu_seqlens=cu_seqlens
+        ... )
+
+    Raises:
+        ValueError: If input shapes are invalid when using cu_seqlens.
+        NotImplementedError: If aiter implementation is incomplete.
+        
+    Note:
+        当前 aiter 的 chunk 实现仍在开发中，部分辅助函数尚未实现。
+    """
+    # Input validation
+    if cu_seqlens is not None:
+        if q.shape[0] != 1:
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
+                f"Please flatten variable-length inputs before processing."
+            )
+        if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+            )
+    
+    # Set default values
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+    
+    # Log operation
+    _LOGGER.info(
+        f"CHUNK_GATED_DELTA_RULE: q={tuple(q.shape)}, k={tuple(k.shape)}, v={tuple(v.shape)}, "
+        f"scale={scale}, use_qk_l2norm={use_qk_l2norm_in_kernel}"
+    )
+    
+    # 尝试使用 aiter 的原生实现
+    if use_qk_l2norm_in_kernel:
+        # TODO: 实现 L2 norm 支持
+        _LOGGER.warning("L2 norm in kernel is not yet supported in aiter chunk implementation")
+        raise NotImplementedError("L2 norm in kernel is not yet supported in aiter chunk implementation")
+    
+    # 调用 aiter 的 chunk 前向传播
+    g, o, A, final_state = chunk_gated_delta_rule_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        scale=scale,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+    )
+    return o.to(q.dtype), final_state
 

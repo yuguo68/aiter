@@ -4,8 +4,10 @@
 
 import torch
 import triton
-from aiter.ops.triton._triton_kernels.gated_delta_rule import _fused_recurrent_gated_delta_rule_fwd_kernel
-from aiter.ops.triton._triton_kernels.chunk_gated_delta_rule import chunk_gated_delta_rule_fwd
+from aiter.ops.triton._triton_kernels.gated_delta_rule import (
+    _fused_recurrent_gated_delta_rule_fwd_kernel,
+    chunk_gated_delta_rule_fwd,
+)
 from aiter.ops.triton.utils.logger import AiterTritonLogger
 
 _LOGGER = AiterTritonLogger()

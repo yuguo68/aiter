@@ -8,6 +8,7 @@ from aiter.ops.triton._triton_kernels.gated_delta_rule import (
     _fused_recurrent_gated_delta_rule_fwd_kernel,
     chunk_gated_delta_rule_fwd,
 )
+from aiter.ops.triton._triton_kernels.gated_delta_rule.utils import l2norm_fwd, l2norm_bwd
 from aiter.ops.triton.utils.logger import AiterTritonLogger
 
 _LOGGER = AiterTritonLogger()
@@ -259,7 +260,8 @@ def chunk_gated_delta_rule(
         NotImplementedError: If aiter implementation is incomplete.
         
     Note:
-        当前 aiter 的 chunk 实现仍在开发中，部分辅助函数尚未实现。
+        The aiter chunk implementation is currently under development, 
+        and some auxiliary functions are not yet implemented.
     """
     # Input validation
     if cu_seqlens is not None:
@@ -284,13 +286,14 @@ def chunk_gated_delta_rule(
         f"scale={scale}, use_qk_l2norm={use_qk_l2norm_in_kernel}"
     )
     
-    # 尝试使用 aiter 的原生实现
+    # Apply L2 normalization if requested
+    q_rstd, k_rstd = None, None
     if use_qk_l2norm_in_kernel:
-        # TODO: 实现 L2 norm 支持
-        _LOGGER.warning("L2 norm in kernel is not yet supported in aiter chunk implementation")
-        raise NotImplementedError("L2 norm in kernel is not yet supported in aiter chunk implementation")
+        _LOGGER.info("Applying L2 normalization to q and k")
+        q, q_rstd = l2norm_fwd(q)
+        k, k_rstd = l2norm_fwd(k)
     
-    # 调用 aiter 的 chunk 前向传播
+    # Call aiter's chunk forward pass
     g, o, A, final_state = chunk_gated_delta_rule_fwd(
         q=q,
         k=k,

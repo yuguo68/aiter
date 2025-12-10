@@ -2,6 +2,20 @@
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Adapted from flash-linear-attention: Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+"""
+Gated Delta Rule Operations (Forward Only).
+
+This module provides high-level interfaces for gated delta rule computations,
+including both fused recurrent and chunk-based implementations.
+
+Important Note:
+    Only forward pass is implemented in aiter. These functions do NOT support
+    gradient computation or backward pass. For training with autograd, please
+    use the flash-linear-attention library instead.
+    
+    These implementations are optimized for inference and forward-only operations.
+"""
+
 import torch
 import triton
 from aiter.ops.triton._triton_kernels.gated_delta_rule import (
@@ -29,11 +43,15 @@ def fused_recurrent_gated_delta_rule(
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
-    Fused recurrent gated delta rule operation using Triton.
+    Fused recurrent gated delta rule operation using Triton (Forward only).
 
     This function implements a recurrent gating mechanism with delta rule updates,
     optimized for GPU execution using Triton kernels. It supports variable-length
     sequences, initial/final states, and multiple gating options.
+    
+    Warning:
+        This function only supports forward pass and does NOT compute gradients.
+        Do not use this for training. For training, use flash-linear-attention library.
 
     Args:
         q (torch.Tensor):
@@ -187,11 +205,15 @@ def chunk_gated_delta_rule(
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
-    Chunk-based gated delta rule operation using Triton.
+    Chunk-based gated delta rule operation using Triton (Forward only).
 
     This function implements chunk-based parallel computation for the gated delta rule,
     optimized for training and long sequences. It uses the native aiter implementation
     with Triton kernels.
+    
+    Warning:
+        This function only supports forward pass and does NOT compute gradients.
+        Do not use this for training. For training, use flash-linear-attention library.
 
     Args:
         q (torch.Tensor):

@@ -2,6 +2,13 @@
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Adapted from flash-linear-attention: Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+"""
+Chunk-based gated delta rule forward computation.
+
+This module implements the chunk-based parallel computation for the gated delta rule.
+Note: Only forward pass is implemented. Backward pass is not supported in aiter.
+"""
+
 import torch
 
 from .utils import chunk_local_cumsum, solve_tril, chunk_scaled_dot_kkt_fwd, recompute_w_u_fwd
@@ -21,10 +28,12 @@ def chunk_gated_delta_rule_fwd(
     cu_seqlens: torch.LongTensor | None = None,
 ):
     """
-    Chunk gated delta rule forward computation.
+    Chunk gated delta rule forward computation (Forward only).
     
     This function implements chunk-based parallel computation for the gated delta rule,
     combining all necessary steps for efficient sequence processing.
+    
+    Note: This implementation only supports forward pass. Backward pass is not available.
     
     Args:
         q: Query tensor of shape [B, T, H, K]

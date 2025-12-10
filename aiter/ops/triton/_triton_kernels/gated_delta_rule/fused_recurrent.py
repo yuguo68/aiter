@@ -2,6 +2,13 @@
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # Adapted from flash-linear-attention: Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+"""
+Fused recurrent gated delta rule forward kernel (Forward only).
+
+This module provides an optimized fused recurrent implementation of the gated delta rule.
+Note: Only forward pass is implemented. Backward pass is not supported in aiter.
+"""
+
 import triton
 import triton.language as tl
 from aiter.ops.triton.utils._triton.kernel_repr import make_kernel_repr

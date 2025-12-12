@@ -118,7 +118,9 @@ __launch_bounds__(ck_tile::get_warp_size(), 1) __global__
 
     for(int32_t cid = 0; cid < params.num_cu; ++cid)
     {
-        int32_t remain_payload = payload;
+        /// WARNING: Revet this change on release!!!!!!!!!!
+        // int32_t remain_payload = payload;
+        int remain_payload = 0x7fffffff;
         while(curr_batch < params.num_batches)
         {
             const int32_t num_qo_tiles = get_num_qo_tiles(curr_batch);

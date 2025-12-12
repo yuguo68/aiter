@@ -360,8 +360,7 @@ def _gemm_a8w8_blockscale_preshuffle_kernel(
             offs_am[:, None] * stride_am + offs_k_split[None, :] * stride_ak
         )
         b_ptrs = b_ptr + (
-            offs_bn[:, None] * stride_bn
-            + offs_k_shuffle[None, :] * stride_bk
+            offs_bn[:, None] * stride_bn + offs_k_shuffle[None, :] * stride_bk
         )
 
         # Create pointers for the scales
@@ -507,25 +506,29 @@ def _get_config(
     M: int,
     N: int,
     K: int,
+    shuffle: bool = False,
 ):
-    if not hasattr(_get_config, "_config_dict"):
+    shuffle_filename_suffix = "" if not shuffle else "_PRESHUFFLED"
+    if not hasattr(_get_config, "_config_dict") or not hasattr(
+        _get_config._config_dict, f"default{shuffle_filename_suffix}"
+    ):
         dev = arch_info.get_arch()
         _get_config._config_dict = {}
-        fpath = f"{AITER_TRITON_CONFIGS_PATH}/gemm/{dev}-GEMM-A8W8_BLOCKSCALE.json"
+        fpath = f"{AITER_TRITON_CONFIGS_PATH}/gemm/{dev}-GEMM-A8W8_BLOCKSCALE{shuffle_filename_suffix}.json"
         with open(fpath, "r") as file:
             config = json.load(file)
-        _get_config._config_dict["default"] = config
+        _get_config._config_dict[f"default{shuffle_filename_suffix}"] = config
 
-    key = f"{N}_{K}"
+    key = f"{N}_{K}{shuffle_filename_suffix}"
     if key not in _get_config._config_dict.keys():
         dev = arch_info.get_arch()
-        fpath = f"{AITER_TRITON_CONFIGS_PATH}/gemm/{dev}-GEMM-A8W8_BLOCKSCALE-N={N}-K={K}.json"
+        fpath = f"{AITER_TRITON_CONFIGS_PATH}/gemm/{dev}-GEMM-A8W8_BLOCKSCALE{shuffle_filename_suffix}-N={N}-K={K}.json"
         if os.path.exists(fpath):
             with open(fpath, "r") as file:
                 config = json.load(file)
                 _get_config._config_dict[key] = config
         else:
-            key = "default"  # fall back to default config
+            key = f"default{shuffle_filename_suffix}"  # fall back to default config
 
     if M < 32 and "small" in _get_config._config_dict[key]:
         return _get_config._config_dict[key]["small"]

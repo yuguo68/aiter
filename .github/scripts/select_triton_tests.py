@@ -119,7 +119,7 @@ def list_triton_source_files() -> (
 # ------------------------------------------------------------------------------
 
 
-def resolve_json_string(json_string: str) -> list[str]:
+def resolve_json_string_interpolation(json_string: str) -> list[str]:
     resolved_strings = [json_string]
     if json_string.startswith("f'") or json_string.startswith('f"'):
         # f-string with variable interpolation.
@@ -136,7 +136,7 @@ def resolve_json_string(json_string: str) -> list[str]:
         # Resolve {dev} interpolation:
         if r"{dev}" in json_string:
             resolved_strings = [
-                json_string.replace(r"{dev}", dev) for dev in {"MI300X", "MI350X"}
+                json_string.replace(r"{dev}", dev) for dev in {"gfx942", "gfx950"}
             ]
             logging.debug(r"Resolved {dev} in JSON string: %s", str(resolved_strings))
         # Remove f-string delimiters if there's no more variable interpolation.
@@ -146,18 +146,28 @@ def resolve_json_string(json_string: str) -> list[str]:
     return resolved_strings
 
 
-def resolve_json_strings(json_strings: list[str]) -> list[str]:
-    resolved_strings = sorted(
+def resolve_json_strings(json_strings: list[str]) -> tuple[list[Path], list[str]]:
+    json_strings = sorted(
         resolved_json_strings
         for json_string in json_strings
-        for resolved_json_strings in resolve_json_string(json_string)
+        for resolved_json_strings in resolve_json_string_interpolation(json_string)
     )
+    resolved: list[Path] = []
+    unresolved: list[str] = []
+    for json_string in json_strings:
+        if (p := Path(json_string)).exists() and p.is_file():
+            resolved.append(p)
+        else:
+            unresolved.append(json_string)
+    if resolved:
+        logging.debug("Resolved JSON config files:")
+        log_file_list(logging.DEBUG, resolved)
     log_level = logging.DEBUG
-    if resolved_strings and logging.getLogger().isEnabledFor(log_level):
-        logging.log(log_level, "Resolved JSON strings:")
-        for resolved_string in resolved_strings:
-            logging.log(log_level, "* %s", resolved_string)
-    return resolved_strings
+    if unresolved and logging.getLogger().isEnabledFor(log_level):
+        logging.log(log_level, "Unresolved JSON strings:")
+        for s in unresolved:
+            logging.log(log_level, "* %s", s)
+    return resolved, unresolved
 
 
 # Git commands.
@@ -428,7 +438,7 @@ def parse_source_file_recursively(
             continue
 
         dependencies, json_strings = parse_source_file(current)
-        json_strings = resolve_json_strings(json_strings)
+        configs, _ = resolve_json_strings(json_strings)
 
         # Add current node to the graph.
         current_str = str(current)
@@ -442,6 +452,14 @@ def parse_source_file_recursively(
             logging.debug("Added graph node [%s].", d_str)
             graph.add_edge(d_str, current_str)
             logging.debug("Added graph edge [%s]->[%s].", d_str, current_str)
+
+        # Add configs of current node, and respective edges, to the graph.
+        for c in configs:
+            c_str = str(c)
+            graph.add_node(c_str)
+            logging.debug("Added graph node [%s].", c_str)
+            graph.add_edge(c_str, current_str)
+            logging.debug("Added graph edge [%s]->[%s].", c_str, current_str)
 
         stack.extend(d for d in dependencies if d.is_file())
         visited.add(current)
@@ -477,6 +495,7 @@ def add_files_to_dependency_graph(
 
 def build_dependency_graph(
     kernel_files: list[Path],
+    cofig_files: list[Path],
     test_files: list[Path],
     bench_files: list[Path],
 ) -> nx.DiGraph:
@@ -494,6 +513,9 @@ def build_dependency_graph(
     # Tag kernel files.
     for kernel_file in kernel_files:
         tag_node(graph, kernel_file, "kernel")
+    # Tag config files.
+    for cofig_file in cofig_files:
+        tag_node(graph, cofig_file, "config")
     return graph
 
 
@@ -629,7 +651,7 @@ def main() -> None:
     del diff_inter_triton
     log_file_list(logging.INFO, sorted_diff_inter_triton)
 
-    graph = build_dependency_graph(kernel_files, test_files, bench_files)
+    graph = build_dependency_graph(kernel_files, config_files, test_files, bench_files)
     _ = find_tests_to_run(graph, sorted_diff_inter_triton)
 
     end_timestamp = time.perf_counter()

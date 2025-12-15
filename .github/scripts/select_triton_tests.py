@@ -240,9 +240,11 @@ class Visitor(ast.NodeVisitor):
     imports_to_ignore: frozenset[str] = frozenset(
         [
             "einops",
+            "iris",
             "jax",
             "jinja2",
             "matplotlib",
+            "mori",
             "numpy",
             "packaging",
             "pandas",
@@ -253,6 +255,9 @@ class Visitor(ast.NodeVisitor):
             "setuptools",
             "torch",
             "triton",
+            "vllm",
+            "yaml",
+            "zmq",
         ]
     )
     json_strings_to_ignore: frozenset[str] = frozenset(
@@ -289,30 +294,49 @@ class Visitor(ast.NodeVisitor):
         self.dependencies: set[Path] = set()
         self.json_strings: set[str] = set()
 
-    def add_dependency(self, import_: str) -> None:
+    def add_dependency(self, import_: str, suppress_warning: bool = False) -> None:
         if not import_ or not self.__class__.is_import_of_interest(import_):
             return
         import_py_file = import_.replace(".", os.sep) + ".py"
+        # Check if it's a module file (e.g., `foo/bar.py`).
         p = root_dir() / import_py_file
         if p.exists() and p.is_file():
-            # Add dependency as Python module / source file, imported with project scope.
             self.dependencies.add(p.relative_to(root_dir()))
             return
-        p = (root_dir() / import_py_file).with_suffix("")
-        if p.exists() and p.is_dir():
-            # Add dependency as Python package / directory.
-            self.dependencies.add(p.relative_to(root_dir()))
+        # Check if it's a package directory with `__init__.py`.
+        p_dir = (root_dir() / import_py_file).with_suffix("")
+        p_init = p_dir / "__init__.py"
+        if p_init.exists() and p_init.is_file():
+            # Add dependency as the `__init__.py` file of the package.
+            self.dependencies.add(p_init.relative_to(root_dir()))
             return
+        # Check for relative imports within the same package.
         p = root_dir() / self.source_file.parent / import_py_file
         if p.exists() and p.is_file():
-            # Add dependency as Python module / source file, imported with local package scope.
             self.dependencies.add(p.relative_to(root_dir()))
             return
-        logging.warning(
-            "Unable to find [%s] dependency of [%s] on filesystem.",
-            import_,
-            self.source_file,
-        )
+        # Check for relative package imports.
+        p_dir = (root_dir() / self.source_file.parent / import_py_file).with_suffix("")
+        p_init = p_dir / "__init__.py"
+        if p_init.exists() and p_init.is_file():
+            self.dependencies.add(p_init.relative_to(root_dir()))
+            return
+        if not suppress_warning:
+            # Check if it's a directory without `__init__.py`` (namespace package or external)
+            p_dir = (root_dir() / import_py_file).with_suffix("")
+            if p_dir.exists() and p_dir.is_dir():
+                logging.debug(
+                    "Directory [%s] exists but has no '__init__.py', skipping dependency [%s] of [%s].",
+                    p_dir.relative_to(root_dir()),
+                    import_,
+                    self.source_file,
+                )
+            else:
+                logging.warning(
+                    "Unable to find [%s] dependency of [%s] on filesystem.",
+                    import_,
+                    self.source_file,
+                )
 
     def add_json_string(self, json_string: str) -> None:
         if not json_string or not self.__class__.is_json_string_of_interest(
@@ -336,6 +360,12 @@ class Visitor(ast.NodeVisitor):
         else:
             full_module_name = module_name
         self.add_dependency(full_module_name)
+        # For "from X import Y", also try to add Y as a potential module
+        # (in case Y is a submodule rather than a name defined in X).
+        if full_module_name and node.names[0].name != "*":
+            for alias in node.names:
+                potential_submodule = f"{full_module_name}.{alias.name}"
+                self.add_dependency(potential_submodule, suppress_warning=True)
         self.generic_visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:
@@ -385,8 +415,6 @@ def parse_source_file(source_file: Path) -> tuple[list[Path], list[str]]:
     return dependecies, json_strings
 
 
-# TODO: How to deal with package imports?
-# TODO: How to deal with `__init__.py` files?
 def parse_source_file_recursively(
     graph: nx.DiGraph,
     source_file: Path,

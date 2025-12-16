@@ -115,6 +115,74 @@ def pa_fwd_asm(
 ) -> torch.Tensor: ...
 
 
+def _should_use_asm_kernel(
+    num_seqs: int,
+    num_heads: int,
+    max_seq_len: int,
+    kv_cache_tensor_dtype: torch.dtype,
+) -> bool:
+    if kv_cache_tensor_dtype == torch.int8:
+        return True
+    total_heads = num_seqs * num_heads
+    if max_seq_len < 1024:
+        return True
+    return total_heads > 256
+
+def paged_attention_common(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    workspace_buffer: torch.Tensor,
+    block_tables: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables_stride0: int,
+    max_qlen: int = 1,
+    max_seq_len: int = 1,
+    cu_query_lens: Optional[torch.Tensor] = None,
+    K_QScale: Optional[torch.Tensor] = None,
+    V_QScale: Optional[torch.Tensor] = None,
+    out_: Optional[torch.Tensor] = None,
+    qo_indptr: Optional[torch.Tensor] = None,
+    high_precision: Optional[
+        int
+    ] = 1,  # [0, 1, 2] 2 is the highest precision, this is only for fp8 kvcache
+    kernelName: Optional[str] = None,
+    kv_cache_tensor_dtype: Optional[torch.dtype] = None,
+) -> torch.Tensor:
+    """
+    Paged attention forward pass with automatic kernel selection.
+    ASM is favored for int8 kv caches, for short ctx_len, or when the workload exceeds
+    the heuristic thresholds for larger ctx_len values.
+    """
+    kv_cache_tensor_dtype = kv_cache_tensor_dtype if kv_cache_tensor_dtype is not None else K.dtype
+    num_seqs, num_heads, head_size = Q.shape
+
+    # Route to ASM kernel based on the heuristic above.
+    use_asm_kernel = _should_use_asm_kernel(
+        num_seqs, num_heads, max_seq_len, kv_cache_tensor_dtype
+    )
+    if use_asm_kernel:
+        return pa_fwd_asm(
+            Q, K, V, block_tables, context_lens, block_tables_stride0,
+            max_qlen, K_QScale, V_QScale, out_, qo_indptr, high_precision, kernelName
+        )
+    
+    # Use HIP kernel for smaller workloads (5D V cache)
+    output = out_ if out_ is not None else torch.empty_like(Q)
+    
+    scale = float(1.0 / (head_size ** 0.5))
+    kv_cache_dtype = "fp8" if K_QScale is not None else "auto"
+    
+    paged_attention_v1_core(
+        output, workspace_buffer, Q, K, V, scale,
+        block_tables, cu_query_lens, context_lens, max_seq_len,
+        None,  # alibi_slopes
+        kv_cache_dtype, "HND", 0.0,  # logits_soft_cap
+        K_QScale, V_QScale,
+    )
+    return output
+
+
 def gen_pa_ps_fwd_asm(
     Q: torch.Tensor,
     K: torch.Tensor,
